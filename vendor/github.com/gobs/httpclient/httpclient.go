@@ -27,26 +27,44 @@ import (
 	//"github.com/jbenet/go-net-reuse"
 )
 
+const (
+	DefaultTimeout  = 30 * time.Second
+	DefaultMaxConns = 50
+)
+
 var (
-	DefaultClient = &http.Client{} // we use our own default client, so we can change the TLS configuration
+	// we use our own default client, so we can change the TLS configuration
+	DefaultClient                      = &http.Client{Timeout: DefaultTimeout}
+	DefaultTransport http.RoundTripper = http.DefaultTransport.(*http.Transport).Clone()
 
 	NoRedirect       = errors.New("No redirect")
 	TooManyRedirects = errors.New("stopped after 10 redirects")
+	NotModified      = errors.New("Not modified")
 )
+
+func init() {
+	// some better defaults for the transport
+	if tr, ok := DefaultTransport.(*http.Transport); ok {
+		tr.MaxIdleConns = DefaultMaxConns
+		tr.MaxConnsPerHost = DefaultMaxConns
+		tr.MaxIdleConnsPerHost = DefaultMaxConns
+	}
+}
 
 //
 // Allow connections via HTTPS even if something is wrong with the certificate
 // (self-signed or expired)
 //
 func AllowInsecure(insecure bool) {
-	if insecure {
-		tr := &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}
+	if tr, ok := DefaultTransport.(*http.Transport); ok {
+		if insecure {
+			tr := tr.Clone()
+			tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 
-		DefaultClient.Transport = tr
-	} else {
-		DefaultClient.Transport = nil
+			DefaultClient.Transport = tr
+		} else {
+			DefaultClient.Transport = DefaultTransport
+		}
 	}
 }
 
@@ -101,6 +119,9 @@ type HttpResponse struct {
 	http.Response
 }
 
+//
+// ContentType returns the response content type
+//
 func (r *HttpResponse) ContentType() string {
 	content_type := r.Header.Get("Content-Type")
 	if len(content_type) == 0 {
@@ -108,6 +129,32 @@ func (r *HttpResponse) ContentType() string {
 	}
 
 	return strings.TrimSpace(strings.Split(content_type, ";")[0])
+}
+
+//
+// ContentDisposition returns the content disposition type, field name and filename values
+//
+func (r *HttpResponse) ContentDisposition() (ctype, name, filename string) {
+	content_disp := r.Header.Get("Content-Disposition")
+	if len(content_disp) == 0 {
+		return
+	}
+
+	parts := strings.Split(content_disp, ";")
+	ctype = parts[0]
+
+	for _, p := range parts[1:] {
+		p = strings.TrimSpace(p)
+		if strings.HasPrefix(p, "name=") {
+			name = strings.Trim(p[5:], `"`)
+		} else if strings.HasPrefix(p, "filename=") {
+			filename = strings.Trim(p[9:], `"`)
+			//} else if strings.Hasprefix(p, "filename=") {
+			//    filename = strings.Trim(p[10:], `"`) // need decoding
+		}
+	}
+
+	return
 }
 
 //
@@ -150,6 +197,10 @@ func (r *HttpResponse) ResponseError() error {
 		}
 	}
 
+	if r.StatusCode == http.StatusNotModified {
+		return NotModified
+	}
+
 	return nil
 }
 
@@ -184,23 +235,12 @@ func canStringify(v reflect.Value) bool {
 }
 
 //
-// Given a base URL and a bag of parameteters returns the URL with the encoded parameters
+// ParamValues fills the input url.Values according to params
 //
-func URLWithPathParams(base string, path string, params map[string]interface{}) (u *url.URL) {
-
-	u, err := url.Parse(base)
-	if err != nil {
-		log.Fatal(err)
+func ParamValues(params map[string]interface{}, q url.Values) url.Values {
+	if q == nil {
+		q = url.Values{}
 	}
-
-	if len(path) > 0 {
-		u, err = u.Parse(path)
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
-
-	q := u.Query()
 
 	for k, v := range params {
 		val := reflect.ValueOf(v)
@@ -231,6 +271,27 @@ func URLWithPathParams(base string, path string, params map[string]interface{}) 
 		}
 	}
 
+	return q
+}
+
+//
+// Given a base URL and a bag of parameteters returns the URL with the encoded parameters
+//
+func URLWithPathParams(base string, path string, params map[string]interface{}) (u *url.URL) {
+
+	u, err := url.Parse(base)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if len(path) > 0 {
+		u, err = u.Parse(path)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	q := ParamValues(params, u.Query())
 	u.RawQuery = q.Encode()
 	return u
 }
@@ -338,12 +399,28 @@ type HttpClient struct {
 	Close bool
 }
 
+func cloneDefaultTransport() http.RoundTripper {
+	type cloner interface {
+		Clone() http.RoundTripper
+	}
+
+	if cl, ok := DefaultTransport.(cloner); ok {
+		return cl.Clone()
+	}
+
+	return DefaultTransport
+}
+
 //
 // Create a new HttpClient
 //
 func NewHttpClient(base string) (httpClient *HttpClient) {
 	httpClient = new(HttpClient)
-	httpClient.client = &http.Client{CheckRedirect: httpClient.checkRedirect}
+	httpClient.client = &http.Client{
+		CheckRedirect: httpClient.checkRedirect,
+		Transport:     cloneDefaultTransport(),
+		Timeout:       DefaultTimeout,
+	}
 	httpClient.Headers = make(map[string]string)
 	httpClient.FollowRedirects = true
 
@@ -352,6 +429,19 @@ func NewHttpClient(base string) (httpClient *HttpClient) {
 	}
 
 	return
+}
+
+//
+// Clone an HttpClient (re-use the same http.Client but duplicate the headers)
+//
+func (self *HttpClient) Clone() *HttpClient {
+	clone := *self
+	clone.Headers = make(map[string]string, len(self.Headers))
+	for k, v := range self.Headers {
+		clone.Headers[k] = v
+	}
+
+	return &clone
 }
 
 // Set Base
@@ -427,36 +517,6 @@ func (self *HttpClient) GetTimeout() time.Duration {
 }
 
 //
-// Set LocalAddr in Dialer
-// (this assumes you also want the SO_REUSEPORT/SO_REUSEADDR stuff)
-//
-/*
-func (self *HttpClient) SetLocalAddr(addr string) {
-	transport, ok := self.client.Transport.(*http.Transport)
-	if transport == nil {
-		if transport, ok = http.DefaultTransport.(*http.Transport); !ok {
-			log.Println("SetLocalAddr for http.DefaultTransport != http.Transport")
-			return
-		}
-	} else if !ok {
-		log.Println("SetLocalAddr for client.Transport != http.Transport")
-		return
-	}
-	if tcpaddr, err := net.ResolveTCPAddr("tcp", addr); err == nil {
-		dialer := &reuse.Dialer{
-			D: net.Dialer{
-				Timeout:   30 * time.Second, // defaults from net/http DefaultTransport
-				KeepAlive: 30 * time.Second, // defaults from net/http DefaultTransport
-				LocalAddr: tcpaddr,
-			}}
-		transport.Dial = dialer.Dial
-	} else {
-		log.Println("Failed to resolve", addr, " to a TCP address")
-	}
-}
-*/
-
-//
 // add default headers plus extra headers
 //
 func (self *HttpClient) addHeaders(req *http.Request, headers map[string]string) {
@@ -480,11 +540,12 @@ func (self *HttpClient) addHeaders(req *http.Request, headers map[string]string)
 			if len, err := strconv.Atoi(v); err == nil && req.ContentLength <= 0 {
 				req.ContentLength = int64(len)
 			}
-		} else {
+		} else if v != "" {
 			req.Header.Set(k, v)
+		} else {
+			req.Header.Del(k)
 		}
 	}
-
 }
 
 //
@@ -526,10 +587,12 @@ func (self *HttpClient) checkRedirect(req *http.Request, via []*http.Request) er
 // Create a request object given the method, path, body and extra headers
 //
 func (self *HttpClient) Request(method string, urlpath string, body io.Reader, headers map[string]string) (req *http.Request) {
-	if u, err := self.BaseURL.Parse(urlpath); err != nil {
-		log.Fatal(err)
-	} else {
-		urlpath = u.String()
+	if self.BaseURL != nil {
+		if u, err := self.BaseURL.Parse(urlpath); err != nil {
+			log.Fatal(err)
+		} else {
+			urlpath = u.String()
+		}
 	}
 
 	req, err := http.NewRequest(strings.ToUpper(method), urlpath, body)
@@ -613,7 +676,15 @@ func Path(path string) RequestOption {
 
 func (c *HttpClient) Path(path string) RequestOption {
 	return func(req *http.Request) (*http.Request, error) {
-		u, err := c.BaseURL.Parse(path)
+		var u *url.URL
+		var err error
+
+		if c.BaseURL == nil {
+			u, err = url.Parse(path)
+		} else {
+			u, err = c.BaseURL.Parse(path)
+		}
+
 		if err != nil {
 			return nil, err
 		}
@@ -717,6 +788,8 @@ func Header(headers map[string]string) RequestOption {
 				if len, err := strconv.Atoi(v); err == nil && req.ContentLength <= 0 {
 					req.ContentLength = int64(len)
 				}
+			} else if v == "" {
+				req.Header.Del(k)
 			} else {
 				req.Header.Set(k, v)
 			}
@@ -749,7 +822,12 @@ func Trace(tracer *httptrace.ClientTrace) RequestOption {
 
 // Execute request
 func (self *HttpClient) SendRequest(options ...RequestOption) (*HttpResponse, error) {
-	req, err := http.NewRequest("GET", self.BaseURL.String(), nil)
+	var path string
+	if self.BaseURL != nil {
+		path = self.BaseURL.String()
+	}
+
+	req, err := http.NewRequest("GET", path, nil)
 	if err != nil {
 		return nil, err
 	}

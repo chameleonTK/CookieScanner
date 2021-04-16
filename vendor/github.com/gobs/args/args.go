@@ -37,7 +37,7 @@ var (
 type Scanner struct {
 	in              *bufio.Reader
 	InfieldBrackets bool
-        UserTokens      string
+	UserTokens      string
 }
 
 // Creates a new Scanner with io.Reader as input source
@@ -70,6 +70,10 @@ func (scanner *Scanner) NextToken() (s string, delim int, err error) {
 			if c == ESCAPE_CHAR && !escape && !rawq {
 				escape = true
 				first = false
+
+                                if infield {
+				    buf.WriteString(string(c))
+                                }
 				continue
 			}
 
@@ -168,14 +172,14 @@ func (scanner *Scanner) NextToken() (s string, delim int, err error) {
 					}
 				}
 
-                                if quote == NO_QUOTE && strings.ContainsRune(scanner.UserTokens, c) {
-                                        //
-                                        // user defined token
-                                        //
-                                        s = buf.String()
-                                        delim = int(c)
-                                        return
-                                }
+				if quote == NO_QUOTE && strings.ContainsRune(scanner.UserTokens, c) {
+					//
+					// user defined token
+					//
+					s = buf.String()
+					delim = int(c)
+					return
+				}
 
 				//
 				// append to buffer
@@ -279,9 +283,9 @@ func (scanner *Scanner) getTokens(max int) ([]string, string, error) {
 
 		tokens = append(tokens, tok)
 
-                if strings.ContainsRune(scanner.UserTokens, rune(delim)) {
-                    tokens = append(tokens, string(delim))
-                }
+		if strings.ContainsRune(scanner.UserTokens, rune(delim)) {
+			tokens = append(tokens, string(delim))
+		}
 
 	}
 
@@ -305,8 +309,8 @@ func InfieldBrackets() GetArgsOption {
 // UserTokens allows a client to define a list of tokens (runes) that can be used as additional separators
 func UserTokens(t string) GetArgsOption {
 	return func(s *Scanner) {
-                s.UserTokens = t
-        }
+		s.UserTokens = t
+	}
 }
 
 func getScanner(line string, options ...GetArgsOption) *Scanner {
@@ -326,7 +330,8 @@ func GetArgs(line string, options ...GetArgsOption) (args []string) {
 	return
 }
 
-// Parse the input line into an array of max n arguments
+// Parse the input line into an array of max n arguments.
+// If n <= 1 this is equivalent to calling GetArgs.
 func GetArgsN(line string, n int, options ...GetArgsOption) []string {
 	scanner := getScanner(line, options...)
 	if n > 0 {
@@ -367,9 +372,9 @@ func (a Args) GetIntOption(name string, def int) int {
 
 func (a Args) GetBoolOption(name string, def bool) bool {
 	if val, ok := a.Options[name]; ok {
-                if val == "" { // --boolopt is the same as --boolopt=true
-                    return true
-                }
+		if val == "" { // --boolopt is the same as --boolopt=true
+			return true
+		}
 
 		b, _ := strconv.ParseBool(val)
 		return b
@@ -377,9 +382,9 @@ func (a Args) GetBoolOption(name string, def bool) bool {
 	return def
 }
 
-func ParseArgs(line string) (parsed Args) {
+func ParseArgs(line string, options ...GetArgsOption) (parsed Args) {
 	parsed = Args{Options: map[string]string{}, Arguments: []string{}}
-	args := GetArgs(line)
+	args := GetArgs(line, options...)
 	if len(args) == 0 {
 		return
 	}

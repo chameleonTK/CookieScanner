@@ -24,6 +24,9 @@ const (
 	// EventClosed represents the "RemoteDebugger.closed" event.
 	// It is emitted when RemoteDebugger.Close() is called.
 	EventClosed = "RemoteDebugger.closed"
+	// EventClosed represents the "RemoteDebugger.disconnected" event.
+	// It is emitted when we lose connection with the debugger and we stop reading events
+	EventDisconnect = "RemoteDebugger.disconnected"
 
 	// NavigationProceed allows the navigation
 	NavigationProceed = NavigationResponse("Proceed")
@@ -44,6 +47,8 @@ const (
 	ErrorReasonNameNotResolved      = ErrorReason("NameNotResolved")
 	ErrorReasonInternetDisconnected = ErrorReason("InternetDisconnected")
 	ErrorReasonAddressUnreachable   = ErrorReason("AddressUnreachable")
+	ErrorReasonBlockedByClient      = ErrorReason("BlockedByClient")
+	ErrorReasonBlockedByResponse    = ErrorReason("BlockedByResponse")
 
 	// VirtualTimePolicyAdvance specifies that if the scheduler runs out of immediate work, the virtual time base may fast forward to allow the next delayed task (if any) to run
 	VirtualTimePolicyAdvance = VirtualTimePolicy("advance")
@@ -53,6 +58,7 @@ const (
 	VirtualTimePolicyPauseIfNetworkFetchesPending = VirtualTimePolicy("pauseIfNetworkFetchesPending")
 
 	AllowDownload   = DownloadBehavior("allow")
+	NameDownload    = DownloadBehavior("allowAndName")
 	DenyDownload    = DownloadBehavior("deny")
 	DefaultDownload = DownloadBehavior("default")
 )
@@ -213,24 +219,54 @@ type RemoteDebugger struct {
 type Params map[string]interface{}
 
 func (p Params) String(k string) string {
-	return p[k].(string)
+	val, _ := p[k].(string)
+	return val
 }
 
 func (p Params) Int(k string) int {
-	return int(p[k].(float64))
+	val, _ := p[k].(float64)
+	return int(val)
+}
+
+func (p Params) Bool(k string) bool {
+	val, _ := p[k].(bool)
+	return val
 }
 
 func (p Params) Map(k string) map[string]interface{} {
-	return p[k].(map[string]interface{})
+	val, _ := p[k].(map[string]interface{})
+	return val
 }
 
 // EventCallback represents a callback event, associated with a method.
 type EventCallback func(params Params)
 
+type ConnectOption func(c *httpclient.HttpClient)
+
+// Host set the host header
+func Host(host string) ConnectOption {
+	return func(c *httpclient.HttpClient) {
+		c.Host = host
+	}
+}
+
+// Headers set specified HTTP headers
+func Headers(headers map[string]string) ConnectOption {
+	return func(c *httpclient.HttpClient) {
+		c.Headers = headers
+	}
+}
+
 // Connect to the remote debugger and return `RemoteDebugger` object.
-func Connect(port string, verbose bool) (*RemoteDebugger, error) {
+func Connect(port string, verbose bool, options ...ConnectOption) (*RemoteDebugger, error) {
+	client := httpclient.NewHttpClient("http://" + port)
+
+	for _, setOption := range options {
+		setOption(client)
+	}
+
 	remote := &RemoteDebugger{
-		http:      httpclient.NewHttpClient("http://" + port),
+		http:      client,
 		requests:  make(chan Params),
 		responses: map[int]chan json.RawMessage{},
 		callbacks: map[string]EventCallback{},
@@ -506,6 +542,8 @@ loop:
 	if remoteClosed {
 		remote.events <- wsMessage{Method: EventClosed, Params: []byte("{}")}
 		close(remote.events)
+	} else if remote.socket() == ws { // we should still be connected but something is wrong
+		remote.events <- wsMessage{Method: EventDisconnect, Params: []byte("{}")}
 	}
 }
 
@@ -976,35 +1014,89 @@ func (remote *RemoteDebugger) GetAllCookies() ([]Cookie, error) {
 	return cookies.Cookies, nil
 }
 
+//Set browser cookies
+func (remote *RemoteDebugger) SetCookies(cookies []Cookie) error {
+	params := Params{}
+	params["cookies"] = cookies
+
+	_, err := remote.SendRequest("Network.setCookies", params)
+	return err
+}
+
+//Set browser cookie
+func (remote *RemoteDebugger) SetCookie(cookie Cookie) bool {
+	params := Params{}
+	params["name"] = cookie.Name
+	params["value"] = cookie.Value
+	if cookie.Domain != "" {
+		params["domain"] = cookie.Domain
+	}
+	if cookie.Path != "" {
+		params["path"] = cookie.Path
+	}
+	if cookie.Secure {
+		params["secure"] = cookie.Secure
+	}
+	if cookie.HttpOnly {
+		params["httpOnly"] = cookie.HttpOnly
+	}
+	if cookie.SameSite != "" {
+		params["sameSite"] = cookie.SameSite
+	}
+	if cookie.Expires > 0 {
+		params["expires"] = cookie.Expires
+	}
+
+	res, err := remote.SendRequest("Network.setCookies", params)
+	if err != nil {
+		return false
+	}
+
+	return res["success"].(bool)
+}
+
 type ResourceType string
 
 const (
-	ResourceTypeDocument    = ResourceType("Document")
-	ResourceTypeStylesheet  = ResourceType("Stylesheet")
-	ResourceTypeImage       = ResourceType("Image")
-	ResourceTypeMedia       = ResourceType("Media")
-	ResourceTypeFont        = ResourceType("Font")
-	ResourceTypeScript      = ResourceType("Script")
-	ResourceTypeTextTrack   = ResourceType("TextTrack")
-	ResourceTypeXHR         = ResourceType("XHR")
-	ResourceTypeFetch       = ResourceType("Fetch")
-	ResourceTypeEventSource = ResourceType("EventSource")
-	ResourceTypeWebSocket   = ResourceType("WebSocket")
-	ResourceTypeManifest    = ResourceType("Manifest")
-	ResourceTypeOther       = ResourceType("Other")
+	ResourceTypeDocument           = ResourceType("Document")
+	ResourceTypeStylesheet         = ResourceType("Stylesheet")
+	ResourceTypeImage              = ResourceType("Image")
+	ResourceTypeMedia              = ResourceType("Media")
+	ResourceTypeFont               = ResourceType("Font")
+	ResourceTypeScript             = ResourceType("Script")
+	ResourceTypeTextTrack          = ResourceType("TextTrack")
+	ResourceTypeXHR                = ResourceType("XHR")
+	ResourceTypeFetch              = ResourceType("Fetch")
+	ResourceTypeEventSource        = ResourceType("EventSource")
+	ResourceTypeWebSocket          = ResourceType("WebSocket")
+	ResourceTypeManifest           = ResourceType("Manifest")
+	ResourceTypeSignedExchange     = ResourceType("SignedExchange")
+	ResourceTypePing               = ResourceType("Ping")
+	ResourceTypeCSPViolationReport = ResourceType("CSPViolationReport")
+	ResourceTypeOther              = ResourceType("Other")
 )
 
 type InterceptionStage string
+type RequestStage string
 
 const (
 	StageRequest         = InterceptionStage("Request")
 	StageHeadersReceived = InterceptionStage("HeadersReceived")
+
+	RequestStageRequest  = RequestStage("Request")
+	RequestStageResponse = RequestStage("Response")
 )
 
 type RequestPattern struct {
 	UrlPattern        string            `json:"urlPattern,omitempty"`
 	ResourceType      ResourceType      `json:"resourceType,omitempty"`
 	InterceptionStage InterceptionStage `json:"interceptionStage,omitempty"`
+}
+
+type FetchRequestPattern struct {
+	UrlPattern   string       `json:"urlPattern,omitempty"`
+	ResourceType ResourceType `json:"resourceType,omitempty"`
+	RequestStage RequestStage `json:"requestStage,omitempty"`
 }
 
 // SetRequestInterception sets the requests to intercept that match the provided patterns
@@ -1071,6 +1163,108 @@ func (remote *RemoteDebugger) ContinueInterceptedRequest(interceptionID string,
 
 	_, err := remote.SendRequest("Network.continueInterceptedRequest", params)
 	return err
+}
+
+// EnableRequestPaused enables issuing of requestPaused events.
+// A request will be paused until client calls one of
+// failRequest, fulfillRequest or continueRequest/continueWithAuth.
+//
+// If patterns is specified, only requests matching any of these patterns will produce
+// fetchRequested event and will be paused until clients response.
+// If not set,all requests will be affected.
+func (remote *RemoteDebugger) EnableRequestPaused(enable bool, patterns ...FetchRequestPattern) error {
+	if !enable {
+		_, err := remote.SendRequest("Fetch.disable", nil)
+		return err
+	}
+
+	var params Params
+
+	if len(patterns) > 0 {
+		params = Params{"patterns": patterns}
+	}
+
+	_, err := remote.SendRequest("Fetch.enable", params)
+	return err
+}
+
+// ContinueRequest is the response to Fetch.requestPaused
+// which either modifies the request to continue with any modifications, or blocks it,
+// or completes it with the provided response bytes.
+//
+// Parameters:
+//  url string - if set the request url will be modified in a way that's not observable by page.
+//  method string - if set this allows the request method to be overridden.
+//  postData string - if set this allows postData to be set.
+//  headers Headers - if set this allows the request headers to be changed.
+func (remote *RemoteDebugger) ContinueRequest(requestID string,
+	url string,
+	method string,
+	postData string,
+	headers map[string]string) error {
+	params := Params{
+		"requestId": requestID,
+	}
+
+	if url != "" {
+		params["url"] = url
+	}
+	if method != "" {
+		params["method"] = method
+	}
+	if postData != "" {
+		params["postData"] = postData
+	}
+	if headers != nil {
+		params["headers"] = headers
+	}
+
+	_, err := remote.SendRequest("Fetch.continueRequest", params)
+	return err
+}
+
+// FailRequest causes the request to fail with specified reason.
+func (remote *RemoteDebugger) FailRequest(requestID string, errorReason ErrorReason) error {
+	_, err := remote.SendRequest("Fetch.failRequest", Params{
+		"requestId":   requestID,
+		"errorReason": errorReason,
+	})
+
+	return err
+}
+
+// FulfillRequest provides a response to the request.
+func (remote *RemoteDebugger) FulfillRequest(requestID string, responseCode int, responsePhrase string, headers map[string]string, body []byte) error {
+	params := Params{
+		"requestId":       requestID,
+		"responseCode":    responseCode,
+		"responseHeaders": headers,
+	}
+
+	if responsePhrase != "" {
+		params["responsePhrase"] = responsePhrase
+	}
+
+	if body != nil {
+		params["body"] = body
+	}
+
+	_, err := remote.SendRequest("Fetch.fulfillRequest", params)
+	return err
+}
+
+func (remote *RemoteDebugger) FetchResponseBody(requestId string) ([]byte, error) {
+	res, err := remote.SendRequest("Fetch.getResponseBody", Params{
+		"requestId": requestId,
+	})
+
+	if err != nil {
+		return nil, err
+	} else if b, ok := res["base64Encoded"]; ok && b.(bool) {
+		return base64.StdEncoding.DecodeString(res["body"].(string))
+	} else {
+		return []byte(res["body"].(string)), nil
+	}
 }
 
 // GetDocument gets the "Document" object as a DevTool node.
@@ -1360,13 +1554,56 @@ func (remote *RemoteDebugger) MouseEvent(ev MouseEvent, x, y int, options ...Mou
 	return err
 }
 
+type EvaluateOption func(params Params)
+
+func UserGesture(enable bool) EvaluateOption {
+	return func(params Params) {
+		params["userGesture"] = enable
+	}
+}
+
+func ReturnByValue(enable bool) EvaluateOption {
+	return func(params Params) {
+		params["returnByValue"] = enable
+	}
+}
+
+func Silent(enable bool) EvaluateOption {
+	return func(params Params) {
+		params["silent"] = enable
+	}
+}
+
+func IncludeCommandLineAPI(enable bool) EvaluateOption {
+	return func(params Params) {
+		params["includeCommandLineAPI"] = enable
+	}
+}
+
+func GeneratePreview(enable bool) EvaluateOption {
+	return func(params Params) {
+		params["generatePreview"] = enable
+	}
+}
+
+func ThrowOnSideEffect(enable bool) EvaluateOption {
+	return func(params Params) {
+		params["throwOnSideEffect"] = enable
+	}
+}
+
 // Evaluate evalutes a Javascript function in the context of the current page.
-func (remote *RemoteDebugger) Evaluate(expr string) (interface{}, error) {
-	res, err := remote.SendRequest("Runtime.evaluate", Params{
+func (remote *RemoteDebugger) Evaluate(expr string, options ...EvaluateOption) (interface{}, error) {
+	params := Params{
 		"expression":    expr,
 		"returnByValue": true,
-	})
+	}
 
+	for _, opt := range options {
+		opt(params)
+	}
+
+	res, err := remote.SendRequest("Runtime.evaluate", params)
 	if err != nil {
 		return nil, err
 	}
@@ -1387,9 +1624,9 @@ func (remote *RemoteDebugger) Evaluate(expr string) (interface{}, error) {
 
 // EvaluateWrap evaluates a list of expressions, EvaluateWrap wraps them in `(function(){ ... })()`.
 // Use a return statement to return a value.
-func (remote *RemoteDebugger) EvaluateWrap(expr string) (interface{}, error) {
+func (remote *RemoteDebugger) EvaluateWrap(expr string, options ...EvaluateOption) (interface{}, error) {
 	expr = fmt.Sprintf("(function(){%v})()", expr)
-	return remote.Evaluate(expr)
+	return remote.Evaluate(expr, options...)
 }
 
 // SetBlockedURLs blocks URLs from loading (wildcards '*' are allowed)
@@ -1432,9 +1669,18 @@ func (remote *RemoteDebugger) ClearBrowserCookies() error {
 	return err
 }
 
+// SetCacheDisabled toggles ignoring cache for each request. If `true`, cache will not be used.
 func (remote *RemoteDebugger) SetCacheDisabled(disabled bool) error {
 	_, err := remote.SendRequest("Network.setCacheDisabled", Params{
 		"cacheDisabled": disabled,
+	})
+	return err
+}
+
+// SetBypassServiceWorker toggles ignoring of service worker for each request
+func (remote *RemoteDebugger) SetBypassServiceWorker(bypass bool) error {
+	_, err := remote.SendRequest("Network.setBypassServiceWorker", Params{
+		"bypass": bypass,
 	})
 	return err
 }
@@ -1579,6 +1825,11 @@ func (remote *RemoteDebugger) ProfilerEvents(enable bool) error {
 // EmulationEvents enables Emulation events listening.
 func (remote *RemoteDebugger) EmulationEvents(enable bool) error {
 	return remote.DomainEvents("Emulation", enable)
+}
+
+// ServiceWorkerEvents enables ServiceWorker events listening.
+func (remote *RemoteDebugger) ServiceWorkerEvents(enable bool) error {
+	return remote.DomainEvents("ServiceWorker", enable)
 }
 
 // ConsoleAPICallback processes the Runtime.consolAPICalled event and returns printable info
