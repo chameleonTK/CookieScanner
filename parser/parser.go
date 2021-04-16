@@ -174,13 +174,8 @@ func (t *Task) parseResponse(rc *recordCollector) (cookieCount int, resultData [
 		reportRecords   = map[string]*reportRecord{}
 	)
 
-	scriptsrc, _ := t.remote.EvaluateWrap(`var scripts = document.getElementsByTagName("script");var urls = []; for (var i = 0; i < scripts.length; i++){ if (scripts[i].src) { urls.push(scripts[i].src);}} return JSON.stringify(urls);;`)
+	scriptsrc, _ := t.remote.EvaluateWrap(`var scripts = document.getElementsByTagName("script");var urls = ""; for (var i = 0; i < scripts.length; i++){ if (scripts[i].src) { urls = urls +" "+scripts[i].src;}} return urls;;`)
 	strsrc := fmt.Sprintf("%v", scriptsrc)
-	fmt.Println(strsrc)
-	fmt.Println(scriptsrc)
-	/*for idx, src := range scriptsrc {
-		fmt.Println(src)
-	}*/
 
 	category := "scripts"
 	//if record, _  = reportRecords[category] {
