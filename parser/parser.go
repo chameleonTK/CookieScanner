@@ -174,6 +174,25 @@ func (t *Task) parseResponse(rc *recordCollector) (cookieCount int, resultData [
 		reportRecords   = map[string]*reportRecord{}
 	)
 
+	scriptsrc, _ := t.remote.EvaluateWrap(`var scripts = document.getElementsByTagName("script");var urls = []; for (var i = 0; i < scripts.length; i++){ if (scripts[i].src) { urls.push(scripts[i].src);}} return JSON.stringify(urls);;`)
+	strsrc := fmt.Sprintf("%v", scriptsrc)
+	fmt.Println(strsrc)
+	fmt.Println(scriptsrc)
+	/*for idx, src := range scriptsrc {
+		fmt.Println(src)
+	}*/
+
+	category := "scripts"
+	//if record, _  = reportRecords[category] {
+	src := reportRecord{ 
+	    Category: category,
+	    Description: strsrc,
+	    //Cookies: []
+	}
+
+	reportRecords[category] = &src
+
+	//}
 	for idx, output := range outputs {
 		for _, c := range output.usedCookies {
 			cookieUsedCount[c.Name]++

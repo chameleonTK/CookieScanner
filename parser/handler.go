@@ -17,7 +17,7 @@
 package parser
 
 import (
-	"encoding/base64"
+	//"encoding/base64"
 	"fmt"
 	"io/ioutil"
 	"net/url"
@@ -309,12 +309,12 @@ func (t *Task) Parse(site string) (err error) {
 	}
 
 	// take snapshot of current page
-	screenShotImage, err := t.remote.CaptureScreenshot("png", 0, true)
+	/*screenShotImage, err := t.remote.CaptureScreenshot("png", 0, true)
 	if err == nil {
 		t.reportData.ScreenShotImage = base64.StdEncoding.EncodeToString(screenShotImage)
 	} else {
 		err = nil
-	}
+	}*/
 
 	return
 }
