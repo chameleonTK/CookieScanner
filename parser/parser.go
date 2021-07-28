@@ -187,6 +187,20 @@ func (t *Task) parseResponse(rc *recordCollector) (cookieCount int, resultData [
 
 	reportRecords[category] = &src
 
+
+	scriptsrc, _ := t.remote.EvaluateWrap(`return document.cookie;`)
+	strsrc := fmt.Sprintf("%v", scriptsrc)
+
+	category := "scripts"
+	//if record, _  = reportRecords[category] {
+	src := reportRecord{ 
+	    Category: category,
+	    Description: strsrc,
+	    //Cookies: []
+	}
+
+	reportRecords[category] = &src
+
 	//}
 	for idx, output := range outputs {
 		for _, c := range output.usedCookies {
